@@ -62,42 +62,39 @@ def calculate_bounding_box(hotpoint: tuple[int, int]) -> tuple[int, int, int, in
 async def process_image(image):
     image_id = image["id"]
 
-    rgb = supabase.storage.from_(STORAGE_BUCKET).download(image["rgb_path"])
+    print(image["rgb_path"])
+    print(supabase.storage.from_(STORAGE_BUCKET).list())
+
     thermal = supabase.storage.from_(STORAGE_BUCKET).download(image["thermal_path"])
 
-    image_array = np.frombuffer(rgb, np.uint8)
+    image_array = np.frombuffer(thermal, np.uint8)
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
     hotpoints = detect_hotpoints(image)
 
-    for hotpoint in hotpoints:
-        x, y, w, h = calculate_bounding_box(hotpoint)
-        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-    await store_detections(image_id, hotpoints)
+    detections = map(lambda point: calculate_bounding_box(point), hotpoints)
+    await store_detections(image_id, detections)
     await mark_entry_processed(image_id)
 
 
-async def store_detections(image_id, hotpoints):
-    detections = []
-    for (x, y, w, h) in hotpoints:
-        detections.append({
-            'image_id': image_id,
+async def store_detections(image_id, detections):
+    for (x, y, w, h) in detections:
+        supabase.table(DETECTIONS_TABLE_NAME).insert({
+            'image': image_id,
             'x': x,
             'y': y,
             'width': w,
             'height': h
-        })
-    await supabase.table(DETECTIONS_TABLE_NAME).insert(detections).execute()
+        }).execute()
 
 
 async def mark_entry_processed(entry_id):
-    await supabase.table(IMAGE_TABLE_NAME).update({'processed': True}).eq('id', entry_id).execute()
+    supabase.table(IMAGE_TABLE_NAME).update({'processed': True}).eq('id', entry_id).execute()
 
 
-def process_db_update(db_image):
+async def process_db_update(db_image):
     image = db_image["record"]
-    asyncio.run(process_image(image))
+    await process_image(image)
 
 
 supabase: Client | None = None
@@ -113,6 +110,6 @@ if __name__ == "__main__":
     s.connect()
 
     channel_1 = s.set_channel("realtime:public:image")
-    channel_1.join().on("INSERT", process_db_update)
+    channel_1.join().on("INSERT", lambda msg: asyncio.create_task(process_db_update(msg)))
 
     s.listen()
