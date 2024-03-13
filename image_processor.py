@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 
 import cv2
@@ -86,7 +87,9 @@ async def store_detections(image, detections):
             'y': y,
             'width': w,
             'height': h,
-            'flight_date': image["flight_date"]
+            'flight_date': image["flight_date"],
+            'location': calculate_new_coordinates(image["location"]["longitude"], image["location"]["latitude"], 10, 30,
+                                                  (320, 240), (x, y))
         }).execute()
 
 
@@ -97,6 +100,46 @@ async def mark_entry_processed(entry_id):
 async def process_db_update(db_image):
     image = db_image["record"]
     await process_image(image)
+
+
+def calculate_new_coordinates(lon, lat, height, fov, img_dim, spot_pos):
+    """
+    Calculate new longitude and latitude of the spot.
+
+    Parameters:
+    - lon, lat: Longitude and latitude of the original position.
+    - height: Height above the ground in meters.
+    - fov: Field of view of the camera in degrees.
+    - img_dim: A tuple (width, height) of the image in pixels.
+    - spot_pos: A tuple (x, y) of the spot position in the image, from top-left corner.
+
+    Returns:
+    - Tuple (new_lon, new_lat): New longitude and latitude of the spot.
+    """
+    img_width, img_height = img_dim
+    x, y = spot_pos
+
+    # Assuming the middle of the image is the original coordinate
+    dx_pixels = x - img_width / 2
+    dy_pixels = img_height / 2 - y  # y is inverted in image coordinates
+
+    # Calculate the scale of the image: meters per pixel
+    # Approximation for small FOV and height
+    scale = 2 * height * math.tan(math.radians(fov / 2)) / img_height
+
+    # Calculate displacement in meters
+    dx_meters = dx_pixels * scale
+    dy_meters = dy_pixels * scale
+
+    # Convert displacement to geographical coordinates
+    # Approximation: 1 degree latitude = 111km, 1 degree longitude varies with latitude
+    delta_lat = dy_meters / 111000  # Degrees
+    delta_lon = dx_meters / (111000 * math.cos(math.radians(lat)))  # Degrees
+
+    new_lat = lat + delta_lat
+    new_lon = lon + delta_lon
+
+    return {'latitude': new_lat, 'longitude': new_lon}
 
 
 supabase: Client | None = None
