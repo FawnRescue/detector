@@ -59,32 +59,34 @@ def calculate_bounding_box(hotpoint: tuple[int, int]) -> tuple[int, int, int, in
 
 
 # Supabase Interaction Functions
-async def process_image(image):
-    image_id = image["id"]
+async def process_image(db_image):
+    image_id = db_image["id"]
 
-    print(image["rgb_path"])
-    print(supabase.storage.from_(STORAGE_BUCKET).list())
+    print("Processing:", db_image["id"])
 
-    thermal = supabase.storage.from_(STORAGE_BUCKET).download(image["thermal_path"])
+    thermal = supabase.storage.from_(STORAGE_BUCKET).download(db_image["thermal_path"])
 
     image_array = np.frombuffer(thermal, np.uint8)
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
     hotpoints = detect_hotpoints(image)
 
-    detections = map(lambda point: calculate_bounding_box(point), hotpoints)
-    await store_detections(image_id, detections)
+    detections = list(map(lambda point: calculate_bounding_box(point), hotpoints))
+    print("Storing", len(detections), "detections")
+
+    await store_detections(db_image, detections)
     await mark_entry_processed(image_id)
 
 
-async def store_detections(image_id, detections):
+async def store_detections(image, detections):
     for (x, y, w, h) in detections:
         supabase.table(DETECTIONS_TABLE_NAME).insert({
-            'image': image_id,
+            'image': image["id"],
             'x': x,
             'y': y,
             'width': w,
-            'height': h
+            'height': h,
+            'flight_date': image["flight_date"]
         }).execute()
 
 
@@ -113,3 +115,6 @@ if __name__ == "__main__":
     channel_1.join().on("INSERT", lambda msg: asyncio.create_task(process_db_update(msg)))
 
     s.listen()
+
+    # Also start listener that checks for unprocessed images periodically, if there was an error with the processing
+    # for example
