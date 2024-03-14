@@ -1,6 +1,9 @@
 import asyncio
+import logging
 import math
 import os
+import uuid
+from typing import List, Tuple, Any
 
 import cv2
 import numpy as np
@@ -19,7 +22,7 @@ DETECTIONS_TABLE_NAME = 'detection'
 STORAGE_BUCKET = 'images'
 
 
-def detect_hotpoints(image: np.ndarray) -> list[tuple[int, int]]:
+def detect_hotpoints(image: np.ndarray) -> list[tuple[Any, Any, Any, Any]]:
     """Detects hotpoints in an image.
 
     Args:
@@ -30,53 +33,46 @@ def detect_hotpoints(image: np.ndarray) -> list[tuple[int, int]]:
     """
 
     # Example: Color Thresholding (adapt this to your specific hotpoint criteria)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)  # Adjust threshold value
+    _, thresholded = cv2.threshold(image, 190, 255, cv2.THRESH_BINARY)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Find contours in the thresholded image
+    contours, _ = cv2.findContours(thresholded, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    hotpoints = []
-    for cnt in contours:
+    # Filter out small contours that are unlikely to be animals
+    min_area = 100  # Adjust this value based on your needs
+    animals = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+
+    # output_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)  # Convert to BGR to draw colored boxes
+    detections = []
+    for cnt in animals:
         x, y, w, h = cv2.boundingRect(cnt)
-        hotpoints.append((x + w // 2, y + h // 2))  # Center of the bounding box
+        detections.append((x, y, w, h))
+    #    cv2.rectangle(output_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-    return hotpoints
+    # Save or display the output image
+    # cv2.imwrite(f"images/{uuid.uuid4()}.jpg", output_image)
 
-
-def calculate_bounding_box(hotpoint: tuple[int, int]) -> tuple[int, int, int, int]:
-    """Calculates a bounding box around a hotpoint.
-
-    Args:
-        hotpoint: The (x, y) coordinates of the hotpoint.
-
-    Returns:
-        A tuple (x, y, width, height) representing the bounding box.
-    """
-
-    x, y = hotpoint
-    MARGIN = 20  # Adjust margin as needed
-
-    return x - MARGIN, y - MARGIN, 2 * MARGIN, 2 * MARGIN
+    return detections
 
 
 # Supabase Interaction Functions
 async def process_image(db_image):
     image_id = db_image["id"]
+    try:
+        logging.info(f"Processing: {db_image['id']}")
 
-    print("Processing:", db_image["id"])
+        thermal = supabase.storage.from_(STORAGE_BUCKET).download(db_image["thermal_path"])
+        image_array = np.frombuffer(thermal, np.uint8)
+        image = cv2.imdecode(image_array, cv2.IMREAD_GRAYSCALE)
 
-    thermal = supabase.storage.from_(STORAGE_BUCKET).download(db_image["thermal_path"])
+        detections = detect_hotpoints(image)
+        logging.info(f"Storing {len(detections)} detections")
 
-    image_array = np.frombuffer(thermal, np.uint8)
-    image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-
-    hotpoints = detect_hotpoints(image)
-
-    detections = list(map(lambda point: calculate_bounding_box(point), hotpoints))
-    print("Storing", len(detections), "detections")
-
-    await store_detections(db_image, detections)
-    await mark_entry_processed(image_id)
+        await store_detections(db_image, detections)
+        await mark_entry_processed(image_id)
+    except Exception as e:
+        logging.error(f"Error processing image {db_image['id']}: {e}")
+        await mark_entry_processed(image_id)
 
 
 async def store_detections(image, detections):
@@ -153,6 +149,12 @@ if __name__ == "__main__":
     URL = f"wss://{SUPABASE_ID}.supabase.co/realtime/v1/websocket?apikey={SUPABASE_KEY}&vsn=1.0.0"
     s = Socket(URL)
     s.connect()
+
+    # response = supabase.table('image').select('*').eq('processed', 'FALSE').execute()
+
+    # print(len(response.data))
+    # for entry in response.data:
+    #    asyncio.run(process_image(entry))
 
     channel_1 = s.set_channel("realtime:public:image")
     channel_1.join().on("INSERT", lambda msg: asyncio.create_task(process_db_update(msg)))
