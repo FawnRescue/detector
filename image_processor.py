@@ -1,11 +1,13 @@
 import asyncio
 import os
+from typing import List, Tuple
 
 import cv2
 import numpy as np
 from dotenv import load_dotenv
 from realtime.connection import Socket
 from supabase import create_client, Client
+from abc import ABC, abstractmethod
 
 load_dotenv()
 
@@ -18,47 +20,61 @@ DETECTIONS_TABLE_NAME = 'detection'
 STORAGE_BUCKET = 'images'
 
 
-def detect_hotpoints(image: np.ndarray) -> list[tuple[int, int]]:
-    """Detects hotpoints in an image.
-
-    Args:
-        image: The image to process.
-
-    Returns:
-        A list of hotpoint coordinates, where each coordinate is a tuple (x, y).
-    """
-
-    # Example: Color Thresholding (adapt this to your specific hotpoint criteria)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)  # Adjust threshold value
-
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    hotpoints = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        hotpoints.append((x + w // 2, y + h // 2))  # Center of the bounding box
-
-    return hotpoints
+class Detector(ABC):
+    @abstractmethod
+    def detect(self, image: np.ndarray) -> list[tuple[int, int, int, int]]:
+        pass
 
 
-def calculate_bounding_box(hotpoint: tuple[int, int]) -> tuple[int, int, int, int]:
-    """Calculates a bounding box around a hotpoint.
+class HotPointDetector(Detector):
+    def __init__(self):
+        pass
 
-    Args:
-        hotpoint: The (x, y) coordinates of the hotpoint.
+    def _detect_hotpoints(self, image: np.ndarray) -> list[tuple[int, int]]:
+        """Detects hotpoints in an image.
 
-    Returns:
-        A tuple (x, y, width, height) representing the bounding box.
-    """
+        Args:
+            image: The image to process.
 
-    x, y = hotpoint
-    MARGIN = 20  # Adjust margin as needed
+        Returns:
+            A list of hotpoint coordinates, where each coordinate is a tuple (x, y).
+        """
 
-    return x - MARGIN, y - MARGIN, 2 * MARGIN, 2 * MARGIN
+        # Example: Color Thresholding (adapt this to your specific hotpoint criteria)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)  # Adjust threshold value
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        hotpoints = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            hotpoints.append((x + w // 2, y + h // 2))  # Center of the bounding box
+
+        return hotpoints
+
+    def _calculate_bounding_box(self, hotpoint: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Calculates a bounding box around a hotpoint.
+
+        Args:
+            hotpoint: The (x, y) coordinates of the hotpoint.
+
+        Returns:
+            A tuple (x, y, width, height) representing the bounding box.
+        """
+
+        x, y = hotpoint
+        MARGIN = 20  # Adjust margin as needed
+
+        return x - MARGIN, y - MARGIN, 2 * MARGIN, 2 * MARGIN
+
+    def detect(self, image: np.ndarray) -> list[tuple[int, int, int, int]]:
+        hotpoints = self._detect_hotpoints(image)
+
+        detections = list(map(lambda point: self._calculate_bounding_box(point), hotpoints))
+        return detections
 
 
-# Supabase Interaction Functions
 async def process_image(db_image):
     image_id = db_image["id"]
 
@@ -69,9 +85,10 @@ async def process_image(db_image):
     image_array = np.frombuffer(thermal, np.uint8)
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
-    hotpoints = detect_hotpoints(image)
+    detector = HotPointDetector()
 
-    detections = list(map(lambda point: calculate_bounding_box(point), hotpoints))
+    detections = detector.detect(image)
+
     print("Storing", len(detections), "detections")
 
     await store_detections(db_image, detections)
